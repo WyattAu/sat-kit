@@ -34,3 +34,12 @@ assert_eq!(s.solve(), sat_kit::Answer::Sat);
   known-hard families (pigeonhole scaling, random 3-SAT near threshold)
 - **M3** SAT Competition 2027 submission: benchmark instances, system
   description, registration
+
+## M3 benchmark set
+
+`cargo run --release --bin genbench` regenerates `instances/` —
+pigeonhole (resolution-hard UNSAT), random 3-SAT near threshold, and
+graph coloring, with solve times in `instances/MANIFEST.md`. PHP(9,8)
+at 2.7s is the first "interesting"-band instance. 11 of 20 done; the
+remaining 9 need new families (cardinality constraints, scheduled
+encodings).
