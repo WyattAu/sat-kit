@@ -7,6 +7,7 @@
 //! DRAT certificate emission lands in M1.
 
 pub mod dimacs;
+pub mod rup;
 
 /// Literal: `1..=n` positive, `-n..=-1` negative (DIMACS convention).
 pub type Lit = i32;
@@ -81,7 +82,9 @@ impl Solver {
     /// Adds a problem clause (empty clause = trivially UNSAT).
     pub fn add_clause(&mut self, lits: Vec<Lit>) {
         let id = self.clauses.len() as u32;
-        self.drat.push_str(&format!("{} 0\n", fmt_lits(&lits)));
+        let line = fmt_lits(&lits);
+        let drat_line = if line.is_empty() { "0\n".to_string() } else { format!("{line} 0\n") };
+        self.drat.push_str(&drat_line);
         self.clauses.push(Clause { lits: lits.clone(), learned: false });
         if lits.len() >= 2 {
             let c = &self.clauses[id as usize].lits;
@@ -191,16 +194,21 @@ impl Solver {
             }
         }
         if self.propagate(0).is_some() {
+            self.drat.push_str("0\n"); // empty clause: UNSAT proof complete
             return Answer::Unsat;
         }
         let mut conflicts_since_restart: u64 = 0;
         let mut restart_limit: u64 = 100;
         loop {
-            if let Some(cid) = self.propagate(level) {
+            if let Some(_cid) = self.propagate(level) {
                 conflicts_since_restart += 1;
                 if level == 0 {
+                    // the conflicting clause is fully false at level 0:
+                    // the empty clause is RUP and completes the proof
+                    self.drat.push_str("0\n");
                     return Answer::Unsat;
                 }
+                let cid = _cid;
                 let (learned, bt) = self.analyze(cid);
                 if learned.is_empty() {
                     return Answer::Unsat;
@@ -357,6 +365,15 @@ impl Solver {
             }
             self.var_inc *= 1e-100;
         }
+    }
+
+    /// Builds a solver from parsed DIMACS.
+    pub fn from_dimacs(d: &dimacs::Dimacs) -> Self {
+        let mut s = Solver::new(d.n_vars);
+        for c in &d.clauses {
+            s.add_clause(c.clone());
+        }
+        s
     }
 
     pub fn model(&self) -> Option<Vec<bool>> {
