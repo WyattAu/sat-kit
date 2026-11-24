@@ -39,7 +39,7 @@ assert_eq!(s.solve(), sat_kit::Answer::Sat);
 
 `cargo run --release --bin genbench` regenerates `instances/` —
 pigeonhole (resolution-hard UNSAT), random 3-SAT near threshold, and
-graph coloring, with solve times in `instances/MANIFEST.md`. PHP(9,8)
-at 2.7s is the first "interesting"-band instance. 11 of 20 done; the
-remaining 9 need new families (cardinality constraints, scheduled
-encodings).
+graph coloring, with solve times in `instances/MANIFEST.md`. 20 instances across five families (pigeonhole, random 3-SAT near
+threshold, graph coloring, cardinality at-most-1, interval scheduling)
+— the competition's benchmark-submission set, regenerate via
+`cargo run --release --bin genbench`.

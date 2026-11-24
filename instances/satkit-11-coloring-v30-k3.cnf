@@ -1,4 +1,4 @@
-c sat-kit benchmark satkit-08-coloring-v30-k3
+c sat-kit benchmark satkit-11-coloring-v30-k3
 p cnf 90 771
 1 2 3 0
 4 5 6 0

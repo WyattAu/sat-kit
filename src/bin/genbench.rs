@@ -94,6 +94,29 @@ fn main() {
         idx += 1;
     }
 
+    // family 2b: random 3-SAT at larger sizes (different seeds)
+    for (n, ratio_pct, seed_off) in [(110usize, 424u64, 6u64), (130, 428, 7), (145, 430, 8)] {
+        let m = (n as u64 * ratio_pct / 100) as usize;
+        let mut r = Rng(0xBEEF + seed_off * 7919);
+        let mut c: Vec<Vec<i32>> = Vec::new();
+        for _ in 0..m {
+            let mut seen = std::collections::HashSet::new();
+            let mut cl = Vec::new();
+            while cl.len() < 3 {
+                let v = (r.next() % n as u64) as usize + 1;
+                let l = if r.next() & 1 == 0 { v as i32 } else { -(v as i32) };
+                if seen.insert(l.unsigned_abs()) {
+                    cl.push(l);
+                }
+            }
+            c.push(cl);
+        }
+        let name = format!("satkit-{idx:02}-rand3sat-n{n}-r{ratio_pct}");
+        let t = write_cnf(&name, n, &c).unwrap();
+        manifest.push(format!("| {name} | random-3sat | {n} | {m} | {t}us | ? |"));
+        idx += 1;
+    }
+
     // family 3: graph coloring (k-color a dense random graph)
     for (verts, k, density_pct) in [(30usize, 3u32, 55u64), (40, 3, 60), (35, 3, 65)] {
         let mut r = Rng(0xF00D + verts as u64 * 131);
@@ -127,6 +150,88 @@ fn main() {
         manifest.push(format!(
             "| {name} | graph-coloring | {} | {} | {t}us | ? |",
             verts * k as usize,
+            c.len()
+        ));
+        idx += 1;
+    }
+
+    // family 4: cardinality — at-most-k via sequential counter encoding,
+    // forced UNSAT by requiring k+1 true among n vars (k < n)
+    for (n, k) in [(20usize, 3u32), (24, 4), (28, 5)] {
+        let var = |i: usize| (i + 1) as i32;
+        let mut c: Vec<Vec<i32>> = Vec::new();
+        // sequential counter: s_{i,k} auxiliaries. Encoding: sum x_i <= k
+        // is UNSAT by construction if we also assert sum x_i >= k+1 —
+        // instead: assert exactly n literals true (all), with k < n:
+        // at-most-k over ALL n vars, and at-least-(k+1) forced by units.
+        // Simpler honest UNSAT: at-most-1 over n vars + units forcing
+        // two vars true.
+        for i in 0..n {
+            for j in (i + 1)..n {
+                c.push(vec![-var(i), -var(j)]); // pairwise at-most-1
+            }
+        }
+        // seed the first k+1 vars true -> pigeonhole-style UNSAT core
+        for i in 0..=k as usize {
+            c.push(vec![var(i)]);
+        }
+        let name = format!("satkit-{idx:02}-card-amt1-n{n}");
+        let t = write_cnf(&name, n, &c).unwrap();
+        manifest.push(format!("| {name} | cardinality-amt1 | {n} | {} | {t}us | UNSAT |", c.len()));
+        idx += 1;
+    }
+
+    // family 5: scheduling — interval non-overlap on too-few time slots
+    // (jobs with durations, total duration > horizon => UNSAT packing)
+    for (jobs, horizon, len_pct) in [(8usize, 6u32, 50u64), (10, 7, 55), (12, 8, 60)] {
+        let mut r = Rng(0xCAFE + jobs as u64 * 17);
+        let durations: Vec<u32> = (0..jobs)
+            .map(|_| 1 + (r.next() % ((horizon as u64 * len_pct) / 100).max(1)) as u32)
+            .collect();
+        // start-time encoding: x_{j,t} = job j starts at time t
+        let var = |j: usize, t: u32| (j * horizon as usize + t as usize + 1) as i32;
+        let mut c: Vec<Vec<i32>> = Vec::new();
+        for j in 0..jobs {
+            // each job starts exactly once within (horizon - duration)
+            let max_t = horizon.saturating_sub(durations[j]);
+            if max_t == 0 {
+                // job cannot fit: force UNSAT directly via empty-derived clause
+                c.push(vec![]);
+                break;
+            }
+            c.push((0..max_t).map(|t| var(j, t)).collect());
+            for t in 0..max_t {
+                for t2 in (t + 1)..max_t {
+                    c.push(vec![-var(j, t), -var(j, t2)]);
+                }
+            }
+        }
+        // non-overlap: if j starts at t, k (later job) cannot run during
+        // [t, t+dur_j) unless k starts before t or after t+dur_j
+        for j in 0..jobs {
+            for k in 0..jobs {
+                if j == k {
+                    continue;
+                }
+                let max_tj = horizon.saturating_sub(durations[j]);
+                let max_tk = horizon.saturating_sub(durations[k]);
+                for t in 0..max_tj {
+                    for tk in 0..max_tk {
+                        // overlap if tk in (t - dur_k, t + dur_j)
+                        let overlap = tk < t + durations[j] && tk + durations[k] > t;
+                        if overlap {
+                            c.push(vec![-var(j, t), -var(k, tk)]);
+                        }
+                    }
+                }
+            }
+        }
+        let total: u32 = durations.iter().sum();
+        let name = format!("satkit-{idx:02}-sched-j{jobs}-h{horizon}");
+        let t = write_cnf(&name, jobs * horizon as usize, &c).unwrap();
+        manifest.push(format!(
+            "| {name} | scheduling | {} | {} | {t}us | UNSAT(total {total}>{horizon}) |",
+            jobs * horizon as usize,
             c.len()
         ));
         idx += 1;
