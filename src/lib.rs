@@ -30,6 +30,9 @@ fn lit_idx(l: Lit) -> usize {
 struct Clause {
     lits: Vec<Lit>,
     learned: bool,
+    /// Literal Block Distance: distinct decision levels in the clause.
+    /// Low-LBD clauses generalize; high-LBD ones drop on reduction.
+    lbd: u32,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -54,6 +57,10 @@ pub struct Solver {
     trail: Vec<Lit>,
     trail_lim: Vec<usize>,
     qhead: usize,
+    learned_count: u64,
+    reductions: u64,
+    /// learned-clause mass that triggers reduce_db (default 4000)
+    pub reduce_threshold: u64,
     watches: Vec<Vec<u32>>,
     activity: Vec<f64>,
     var_inc: f64,
@@ -72,6 +79,9 @@ impl Solver {
             trail: Vec::new(),
             trail_lim: Vec::new(),
             qhead: 0,
+            learned_count: 0,
+            reductions: 0,
+            reduce_threshold: 4000,
             watches: vec![Vec::new(); 2 * n_vars],
             activity: vec![0.0; n_vars],
             var_inc: 1.0,
@@ -85,7 +95,7 @@ impl Solver {
         let line = fmt_lits(&lits);
         let drat_line = if line.is_empty() { "0\n".to_string() } else { format!("{line} 0\n") };
         self.drat.push_str(&drat_line);
-        self.clauses.push(Clause { lits: lits.clone(), learned: false });
+        self.clauses.push(Clause { lits: lits.clone(), learned: false, lbd: 0 });
         if lits.len() >= 2 {
             let c = &self.clauses[id as usize].lits;
             self.watches[lit_idx(c[0])].push(id);
@@ -195,6 +205,7 @@ impl Solver {
         }
         if self.propagate(0).is_some() {
             self.drat.push_str("0\n"); // empty clause: UNSAT proof complete
+            self.learned_count += 1;
             return Answer::Unsat;
         }
         let mut conflicts_since_restart: u64 = 0;
@@ -206,6 +217,7 @@ impl Solver {
                     // the conflicting clause is fully false at level 0:
                     // the empty clause is RUP and completes the proof
                     self.drat.push_str("0\n");
+                    self.learned_count += 1;
                     return Answer::Unsat;
                 }
                 let cid = _cid;
@@ -230,11 +242,25 @@ impl Solver {
                 if lits.len() >= 2 {
                     self.watches[lit_idx(lits[1])].push(id);
                 }
+                let mut lvls: Vec<u32> =
+                    lits.iter().map(|l| self.level_of[var(*l) - 1]).collect();
+                lvls.sort_unstable();
+                lvls.dedup();
+                let lbd = lvls.len() as u32;
                 self.drat.push_str(&format!("{} 0\n", fmt_lits(&lits)));
-                self.clauses.push(Clause { lits, learned: true });
+                self.clauses.push(Clause { lits, learned: true, lbd });
+                self.learned_count += 1;
                 let l = learned[0];
                 self.assign_lit(l, level, Some(id));
                 continue;
+            }
+            // clause-DB reduction: when learned mass grows, drop the worst
+            // half by LBD (locked clauses — reasons of live assignments —
+            // survive). Emits DRAT deletion lines so the certificate
+            // mirrors the solver's clause set.
+            if self.learned_count > self.reduce_threshold + 300 * self.reductions {
+                self.reductions += 1;
+                self.reduce_db();
             }
             if conflicts_since_restart >= restart_limit && level > 0 {
                 restart_limit = (restart_limit as f64 * 1.5) as u64;
@@ -250,6 +276,64 @@ impl Solver {
                     self.assign_lit(l, level, None);
                 }
                 None => return Answer::Sat,
+            }
+        }
+    }
+
+    /// Drops the worst half of learned clauses by LBD. Locked clauses
+    /// (reasons of live assignments), binaries, and LBD <= 2 (glue)
+    /// survive. Emits DRAT deletion lines; rebuilds watch lists.
+    fn reduce_db(&mut self) {
+        let mut locked: Vec<bool> = vec![false; self.clauses.len()];
+        for v in 0..self.n_vars {
+            if self.assign[v] != Assign::Unset {
+                if let Some(cid) = self.reason[v] {
+                    locked[cid as usize] = true;
+                }
+            }
+        }
+        let mut ranked: Vec<(u32, u32)> = (0..self.clauses.len() as u32)
+            .filter(|&id| {
+                let c = &self.clauses[id as usize];
+                c.learned && !locked[id as usize] && c.lits.len() > 2 && c.lbd > 2
+            })
+            .map(|id| (self.clauses[id as usize].lbd, id))
+            .collect();
+        ranked.sort_unstable();
+        let dropped: Vec<u32> = ranked
+            .iter()
+            .take(ranked.len() / 2)
+            .map(|(_, id)| *id)
+            .collect();
+        for &id in dropped.iter().rev() {
+            let lits = self.clauses[id as usize].lits.clone();
+            self.drat.push_str(&format!("d {} 0\n", fmt_lits(&lits)));
+        }
+        let mut new_clauses: Vec<Clause> = Vec::with_capacity(self.clauses.len());
+        let mut id_map: std::collections::HashMap<u32, u32> =
+            std::collections::HashMap::new();
+        let mut kept = 0u64;
+        for (i, c) in self.clauses.drain(..).enumerate() {
+            if dropped.binary_search(&(i as u32)).is_err() {
+                id_map.insert(i as u32, new_clauses.len() as u32);
+                if c.learned {
+                    kept += 1;
+                }
+                new_clauses.push(c);
+            }
+        }
+        self.clauses = new_clauses;
+        self.learned_count = kept;
+        for r in self.reason.iter_mut() {
+            if let Some(cid) = *r {
+                *r = id_map.get(&cid).copied();
+            }
+        }
+        self.watches = vec![Vec::new(); 2 * self.n_vars];
+        for (id, c) in self.clauses.iter().enumerate() {
+            if c.lits.len() >= 2 {
+                self.watches[lit_idx(c.lits[0])].push(id as u32);
+                self.watches[lit_idx(c.lits[1])].push(id as u32);
             }
         }
     }
@@ -374,6 +458,11 @@ impl Solver {
             s.add_clause(c.clone());
         }
         s
+    }
+
+    /// Number of learned clauses still pending reduction accounting.
+    pub fn learned_count(&self) -> u64 {
+        self.learned_count
     }
 
     pub fn model(&self) -> Option<Vec<bool>> {

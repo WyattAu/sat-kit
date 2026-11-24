@@ -83,6 +83,16 @@ impl RupChecker {
         }
     }
 
+    /// Removes an exact clause from the available set (DRAT deletion).
+    /// Returns false if no exact match exists.
+    pub fn delete(&mut self, lits: &[i32]) -> bool {
+        if let Some(pos) = self.clauses.iter().position(|c| c == lits) {
+            self.clauses.remove(pos);
+            return true;
+        }
+        false
+    }
+
     /// Checks that clause `c` is RUP: assuming its negations propagates to
     /// a conflict. On success, `c` joins the available clause set.
     pub fn check_and_add(&mut self, c: Vec<i32>) -> bool {
